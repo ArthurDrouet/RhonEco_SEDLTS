@@ -1,0 +1,322 @@
+---
+title: "RLQ"
+subtitle: "RhonECO"
+author: "Arthur DROUET"
+date: "2026-03-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Loading Data + Correspondence des tables
+
+```{r}
+library(phyloseq)
+library(dplyr)
+library(ade4)
+library(readxl)
+library(tibble)
+
+# Optional: save/load the full R session (useful as a checkpoint)
+#save.image(file = file.path("D:/RhonEco_MicroBiome/Scripts/12_RLQ/12_RLQ_RMD.rmd"))
+load(file = file.path("D:/RhonEco_MicroBiome/Scripts/12_RLQ/12_RLQ_RMD.rmd"))
+
+# Charger les données
+ps <- readRDS("D:/RhonEco_MicroBiome/Results/10_Normalisation/Dada2_Cluster97/phyloseq_objects/ps_raw_filt.rds")
+
+trait <- read.csv2(
+  "D:/RhonEco_MicroBiome/Scripts/9_Bactotrait/BACTOTRAITS_R_PROJECT_2026-01-28/OUTPUTS/PS_Filt/DATA_TRAITS_PER_OTU.csv",
+  check.names = FALSE,
+  na.strings = c("NA", "NaN", "")
+)
+
+# Correspondance des tables
+rownames(trait) <- trait$OTU_name
+asv_keep <- intersect(taxa_names(ps), rownames(trait))
+
+ps_traits <- prune_taxa(asv_keep, ps)
+trait <- trait[asv_keep, ]
+```
+
+## Préparer L = sites X taxons
+
+```{r}
+L <- as.data.frame(otu_table(ps_traits))
+if (taxa_are_rows(ps_traits)) {
+  L <- t(L)}
+L <- as.data.frame(L, check.names = FALSE)
+
+cat("Dimensions de L :", dim(L), "\n")
+```
+
+## Préparer R = sites x environnement
+
+```{r}
+R0 <- data.frame(sample_data(ps_traits), check.names = FALSE)
+R0$Sample_ID <- rownames(R0)
+
+vars_env <- c(
+  "PH_sediment",
+  "Temperature",
+  "Cond",
+  "O2%",
+  "Taux_MO",
+  "Sable"
+)
+
+vars_needed <- c("Sample_ID", vars_env)
+
+R <- R0[, vars_needed, drop = FALSE]
+rownames(R) <- R$Sample_ID
+R$Sample_ID <- NULL
+
+colnames(R)[colnames(R) == "O2%"] <- "O2"
+R$O2 <- as.numeric(R$O2)
+
+# conversion en numérique
+R[] <- lapply(R, function(x) as.numeric(as.character(x)))
+
+cat("Dimensions de R :", dim(R), "\n")
+print(colSums(is.na(R)))
+
+keep_sites <- complete.cases(R)
+
+R <- R[keep_sites, , drop = FALSE]
+L <- L[keep_sites, , drop = FALSE]
+```
+
+## Préparer Q = taxons x traits
+
+```{r}
+cols_drop <- c("Taxonomic_affiliation", "Taxonomic_match_level", "ASV_name", "OTU_name")
+cols_drop <- cols_drop[cols_drop %in% colnames(trait)]
+
+Q <- trait[, !(colnames(trait) %in% cols_drop), drop = FALSE]
+
+# convertir en numérique
+Q <- data.frame(lapply(Q, as.numeric), row.names = rownames(Q), check.names = FALSE)
+
+cat("Dimensions de Q :", dim(Q), "\n")
+cat("NA dans Q :", sum(is.na(Q)), "\n")
+
+
+traits_keep <- c(
+  
+  # GRAM
+  "gram_stain_positive",
+  "gram_stain_negative",
+  
+  # Cell length
+  "cell_length_<=_0.9",
+  "cell_length_>_0.9_to_1.3",
+  "cell_length_>_1.3_to_2",
+  "cell_length_>_2",
+  
+  # Cell width
+  "cell_width_<=_0.3",
+  "cell_width_>_0.3_to_0.5",
+  "cell_width_>_0.5_to_0.7",
+  "cell_width_>_0.7",
+  
+  # Motility
+  "motility_no",
+  "motility_yes",
+  
+  # Pigment
+  "pigmentation_production_yes",
+  "pigmentation_production_no",
+  
+  # Temperature preference
+  "temperature_preference_psychrophilic",
+  "temperature_preference_psychrotrophic",
+  "temperature_preference_mesophilic",
+  "temperature_preference_thermophilic",
+  
+  # pH preference
+  "pH_preference_acidophile",
+  "pH_preference_acido-neutrophile",
+  "pH_preference_neutrophile",
+  "pH_preference_alkalino-neutrophile",
+  "pH_preference_alkalino-alkaliphile",
+  
+  # Spore
+  "spore_formation_no",
+  "spore_formation_yes",
+  
+  # Halophily
+  "halophily_preference_non-halophilic",
+  "halophily_preference_weakly",
+  "halophily_preference_moderate",
+  "halophily_preference_extreme",
+  
+  # Oxygen tolerance
+  "oxygen_tolerance_facultative",
+  "oxygen_tolerance_microaerophile",
+  "oxygen_tolerance_anaerobe",
+  "oxygen_tolerance_aerobe",
+  
+  # Energy source
+  "energy_source_chemotroph",
+  "energy_source_phototroph",
+  
+  # Electron donor
+  "electron_donnor_organotroph",
+  "electron_donnor_lithotroph",
+  
+  # Carbon source
+  "carbon_source_autotroph",
+  "carbon_source_heterotroph",
+  
+  # multicellular
+  "forms_multicellular_complex_no",
+  "forms_multicellular_complex_yes"
+)
+
+Q_sel <- Q[, traits_keep]
+
+#remplace NA en 0
+Q_sel[is.na(Q_sel)] <- 0
+
+col.blocks <- c(
+  2,  # gram
+  4,  # cell length
+  4,  # cell width
+  2,  # motility
+  2,  # pigment
+  4,  # temperature pref
+  5,  # pH pref
+  2,  # spore
+  4,  # halophily
+  4,  # oxygen
+  2,  # energy source
+  2,  # electron donor
+  2,  # carbon source
+  2   # multicellular
+)
+
+sum(col.blocks)
+ncol(Q_sel)
+
+```
+
+## Analyse RLQ
+
+```{r}
+
+# 1) CA sur L 
+# -> Analyse Factorielle des Correspondances (Correspondence Analysis)
+coa.L <- dudi.coa(L, scannf = FALSE)
+
+# 2) PCA sur R avec les poids des sites
+# -> Analyse en Composantes Principales (Principal Component Analysis)
+pca.R <- dudi.pca(R, row.w = coa.L$lw, scannf = FALSE)
+
+# 3) Repréparer Qf avec les poids des taxons de L
+# -> Donne un points aux taxons selon son abondance dans L
+Qf <- prep.fuzzy.var(Q_sel, col.blocks, row.w = coa.L$cw)
+
+# 4) FCA sur Q pondéré correctement
+fca.Q <- dudi.fca(Qf, scannf = FALSE)
+#fpca.Q <- dudi.fpca(Qf, scannf = FALSE)
+
+# 5) Vérification
+all.equal(pca.R$lw, coa.L$lw)
+all.equal(fca.Q$lw, coa.L$cw)
+#all.equal(fpca.Q$lw, coa.L$cw)
+
+# 6) RLQ
+rlq.res <- rlq(pca.R, coa.L, fca.Q, scannf = FALSE)
+#rlq.res <- rlq(pca.R, coa.L, fpca.Q, scannf = FALSE)
+
+summary(rlq.res)
+```
+
+```{r}
+rlq.res$l1   # scores lignes / sites
+rlq.res$c1   # scores colonnes / taxons
+rlq.res$aR   # coefficients / variables R
+rlq.res$aQ   # coefficients / variables Q
+```
+
+```{r}
+randtest(rlq.res)
+rlq.res$l1
+rlq.res$c1
+
+scatter(rlq.res)
+plot(rlq.res)
+```
+
+```{r}
+barplot(
+  100 * rlq.res$eig / sum(rlq.res$eig),
+  names.arg = paste0("Ax", seq_along(rlq.res$eig)),
+  ylab = "% inertie projetée",
+  main = "Importance relative des axes RLQ"
+)
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tibble)
+
+df_R <- rlq.res$l1 %>%
+  rownames_to_column("Variable") %>%
+  arrange(RS1)
+
+ggplot(df_R, aes(x = reorder(Variable, RS1), y = RS1)) +
+  geom_hline(yintercept = 0, linetype = 2, color = "grey60") +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Variables environnementales associées à RLQ1",
+    x = NULL,
+    y = "Score sur RLQ1"
+  ) +
+  theme_classic(base_size = 13)
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tibble)
+
+df_Q <- rlq.res$c1 %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Trait") %>%
+  dplyr::mutate(abs_CS1 = abs(CS1)) %>%
+  dplyr::arrange(dplyr::desc(abs_CS1)) %>%
+  dplyr::slice(1:20) %>%
+  dplyr::arrange(CS1)
+
+ggplot(df_Q, aes(x = reorder(Trait, CS1), y = CS1)) +
+  geom_hline(yintercept = 0, linetype = 2, color = "grey60") +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Traits microbiens les plus associés à RLQ1",
+    x = NULL,
+    y = "Score sur RLQ1"
+  ) +
+  theme_classic(base_size = 13)
+```
+
+```{r}
+rt_rlq <- randtest(rlq.res, nrepet = 999)
+rt_rlq
+plot(rt_rlq)
+```
+
+## Fourthcorner
+
+```{r}
+fourthcorner.rlq(rlq.res,type="Q.axes")
+fourthcorner.rlq(rlq.res,type="R.axes")
+```
+
+```{r}
+save.image(file = file.path("D:/RhonEco_MicroBiome/Scripts/12_RLQ/12_RLQ_RMD.rmd"))
+```
